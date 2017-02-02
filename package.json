@@ -1,0 +1,26 @@
+{
+  "name": "queuey",
+  "version": "1.0.0",
+  "description": "simple persistent queues",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvayngrib/queuey"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "bluebird": "^3.4.7",
+    "lowdb": "^0.14.0"
+  },
+  "keywords": [
+    "queue",
+    "persistent",
+    "persistent-queue"
+  ],
+  "scripts": {
+    "test": "node test"
+  },
+  "devDependencies": {
+    "tape": "^4.6.3"
+  }
+}
