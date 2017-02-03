@@ -114,6 +114,7 @@ function createQueue ({ items, worker, save, autostart }) {
 
   function enqueue (item) {
     items.push(item)
+    save(items)
     processNext()
   }
 
