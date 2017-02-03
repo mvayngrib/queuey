@@ -6,15 +6,16 @@ const co = Promise.coroutine
 
 module.exports = function createQueueManager (path) {
   const db = low(path)
-
   db.defaults({
-    queues: {}
-  })
+      queues: {}
+    })
+    .value()
 
   const running = {}
 
   function getQueue ({ name, worker }) {
     if (running[name]) return running[name]
+    if (!worker) throw new Error('expected "worker"')
 
     const path = `queues.${name}`
     let items = db.get(path).value()
@@ -52,6 +53,14 @@ module.exports = function createQueueManager (path) {
   const emitter = new EventEmitter()
   emitter.queue = getQueue
   emitter.clear = clear
+  emitter.queued = function (name) {
+    if (name) {
+      return getQueue({ name }).queued()
+    }
+
+    return db.get('queues').value()
+  }
+
   return emitter
 }
 
@@ -106,6 +115,9 @@ function createQueue (items, worker, save) {
   emitter.enqueue = enqueue
   emitter.stop = stop
   emitter.start = stop
+  emitter.queued = function () {
+    return items.slice()
+  }
 
   Object.defineProperty(emitter, 'length', {
     get: function () {
