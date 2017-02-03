@@ -13,7 +13,7 @@ module.exports = function createQueueManager (path) {
 
   const running = {}
 
-  function getQueue ({ name, worker }) {
+  function getQueue ({ name, worker, autostart=true }) {
     if (running[name]) return running[name]
     if (!worker) throw new Error('expected "worker"')
 
@@ -24,7 +24,13 @@ module.exports = function createQueueManager (path) {
       update(items)
     }
 
-    const queue = running[name] = createQueue(items, worker, update)
+    const queue = running[name] = createQueue({
+      items,
+      worker,
+      autostart,
+      save: update
+    })
+
     queue.on('pop', function (item) {
       emitter.emit('pop', name, item)
     })
@@ -65,7 +71,7 @@ module.exports = function createQueueManager (path) {
 }
 
 
-function createQueue (items, worker, save) {
+function createQueue ({ items, worker, save, autostart }) {
   let stopped
   let pending = Promise.resolve()
   let processing
@@ -114,7 +120,7 @@ function createQueue (items, worker, save) {
   const emitter = new EventEmitter()
   emitter.enqueue = enqueue
   emitter.stop = stop
-  emitter.start = stop
+  emitter.start = start
   emitter.queued = function () {
     return items.slice()
   }
@@ -125,7 +131,7 @@ function createQueue (items, worker, save) {
     }
   })
 
-  processNext()
+  if (autostart) start()
 
   return emitter
 }
