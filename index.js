@@ -35,6 +35,10 @@ module.exports = function createQueueManager (path) {
       emitter.emit('pop', name, item)
     })
 
+    queue.on('stop', function () {
+      emitter.emit('stop', name)
+    })
+
     return queue
 
     function update (items) {
@@ -108,6 +112,7 @@ function createQueue ({ items, worker, save, autostart }) {
 
       emitter.once('pop', function () {
         resolve()
+        emitter.emit('stop')
       })
     })
   }
