@@ -42,13 +42,15 @@ module.exports = function createQueueManager (path) {
     }
   }
 
-  const clear = co(function* clear () {
-    yield stopAll()
+  const clear = co(function* clear (name) {
+    if (name) return running[name].clear()
+
+    yield clearAll()
     db.set('queues', {}).value()
   })
 
-  function stopAll () {
-    return Promise.all(Object.keys(running).map(stop))
+  function clearAll () {
+    return Promise.all(Object.keys(running).map(clear))
   }
 
   const stop = co(function* stop (name) {
@@ -98,6 +100,8 @@ function createQueue ({ items, worker, save, autostart }) {
   }
 
   function stop () {
+    if (stopped) return Promise.resolve()
+
     stopped = true
     return new Promise(resolve => {
       if (!processing) return resolve()
@@ -119,10 +123,19 @@ function createQueue ({ items, worker, save, autostart }) {
     processNext()
   }
 
+  const clear = co(function* clear () {
+    let wasStopped = stopped
+    yield stop()
+    items.length = 0
+    save(items)
+    if (!wasStopped) start()
+  })
+
   const emitter = new EventEmitter()
   emitter.enqueue = enqueue
   emitter.stop = stop
   emitter.start = start
+  emitter.clear = clear
   emitter.queued = function () {
     return items.slice()
   }
