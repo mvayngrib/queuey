@@ -47,7 +47,15 @@ module.exports = function createQueueManager (path) {
   }
 
   const clear = co(function* clear (name) {
-    if (name) return running[name].clear()
+    if (name) {
+      if (running[name]) {
+        yield running[name].clear()
+      } else {
+        db.set(`queues.${name}`, []).value()
+      }
+
+      return
+    }
 
     yield clearAll()
     db.set('queues', {}).value()
@@ -58,8 +66,10 @@ module.exports = function createQueueManager (path) {
   }
 
   const stop = co(function* stop (name) {
-    yield running[name].stop()
-    delete running[name]
+    if (running[name]) {
+      yield running[name].stop()
+      delete running[name]
+    }
   })
 
   const emitter = new EventEmitter()
