@@ -59,6 +59,7 @@ module.exports = function createQueueManager (path) {
   const emitter = new EventEmitter()
   emitter.queue = getQueue
   emitter.clear = clear
+  emitter.stop = stop
   emitter.queued = function (name) {
     if (name) {
       return getQueue({ name }).queued()
