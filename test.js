@@ -3,68 +3,66 @@ const fs = require('fs')
 const test = require('tape')
 const Promise = require('bluebird')
 const co = Promise.coroutine
+const memdb = require('memdb')
 const makeQueues = require('./')
-const TEST_DB = './testdb.json'
 
-test('basic', function (t) {
-  cleanup()
-
+test.only('basic', co(function* (t) {
   const queues = getQueues()
-  t.same(queues.queued(), {})
+  t.same(yield queues.queued(), {})
 
   const queue = getTimeoutQueue(queues)
-  t.same(queues.queued(), { wait: [] })
+  t.same(yield queues.queued(), { wait: [] })
 
   const todo = [
-    { timeout: 100, value: 0 },
     { timeout: 50, value: 1 },
     { timeout: 10, value: 2 }
   ];
 
-  todo.forEach(item => queue.enqueue(item))
+  yield Promise.all(todo.map(item => queue.enqueue(item)))
 
-  t.same(queues.queued(), { 'wait': todo })
-  t.same(queue.queued(), todo)
+  t.same(yield queues.queued(), { wait: todo })
+  t.same(yield queue.queued(), todo)
+
+  queue.start()
 
   let i = 0
-  queue.once('pop', function () {
-    queue.stop()
+  queue.once('pop', co(function* () {
+    yield queue.stop()
     reopen()
-  })
+  }))
 
   queue.on('pop', function (item) {
     t.equal(item.value, i++)
   })
 
-  function reopen () {
+  const reopen = co(function* reopen () {
     const queues = getQueues()
     const resurrected = getTimeoutQueue(queues)
-    t.same(queues.queued(), { wait: todo.slice(1) })
-    t.same(queues.queued('wait'), todo.slice(1))
-    t.same(resurrected.queued(), todo.slice(1))
+    t.same(yield queues.queued(), { wait: todo.slice(1) })
+    t.same(yield queues.queued('wait'), todo.slice(1))
+    t.same(yield resurrected.queued(), todo.slice(1))
     resurrected.on('pop', function (item) {
       t.equal(item.value, i++)
-      if (i === 3) {
+      if (i === todo.length) {
         t.end()
       }
     })
-  }
+  })
 
   function getQueues () {
-    return makeQueues(TEST_DB)
+    return makeQueues(memdb())
   }
 
-  function getTimeoutQueue (queues) {
+  function getTimeoutQueue (queues, autostart=false) {
     return queues.queue({
+      autostart,
       name: 'wait',
       worker: timeoutSuccess
     })
   }
-})
+}))
 
 test('clear one', co(function* (t) {
-  cleanup()
-
   const todo = [
     { timeout: 100 },
     { timeout: 50 },
@@ -74,7 +72,7 @@ test('clear one', co(function* (t) {
   let expectedFinished = 1
   let finished = 0
 
-  const queues = makeQueues(TEST_DB)
+  const queues = makeQueues(memdb())
   const a = queues.queue({ name: 'a', worker: timeoutCounter })
   todo.forEach(item => a.enqueue(item))
   t.same(a.queued(), todo)
@@ -96,8 +94,7 @@ test('clear one', co(function* (t) {
 }))
 
 test('clear all', co(function* (t) {
-  cleanup()
-  const queues = makeQueues(TEST_DB)
+  const queues = makeQueues(memdb())
   const todo = [
     { timeout: 100 },
     { timeout: 50 },
@@ -134,7 +131,6 @@ test('clear all', co(function* (t) {
 }))
 
 test('cleanup', function (t) {
-  cleanup()
   t.end()
 })
 
@@ -153,10 +149,3 @@ function timeoutError (item) {
     }, item.timeout)
   })
 }
-
-function cleanup () {
-  if (fs.existsSync(TEST_DB)) {
-    fs.unlinkSync(TEST_DB)
-  }
-}
-

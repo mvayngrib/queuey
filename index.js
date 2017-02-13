@@ -1,34 +1,32 @@
 
 const { EventEmitter } = require('events')
-const low = require('lowdb')
+const changesFeed = require('changes-feed')
+const subdown = require('subleveldown')
+const levelup = require('levelup')
 const Promise = require('bluebird')
+const levelJobs = require('level-jobs')
 const co = Promise.coroutine
+const collect = Promise.promisify(require('stream-collector'))
+const noop = function () {}
+const LEVEL_JOBS_OPTS = {
+  maxConcurrency: 1,
+  maxRetries: 0
+}
 
-module.exports = function createQueueManager (path) {
-  const db = low(path)
-  db.defaults({
-      queues: {}
-    })
-    .value()
-
+module.exports = function createQueues (db) {
+  db = Promise.promisifyAll(db)
   const running = {}
-
-  function getQueue ({ name, worker, autostart=true }) {
+  const mainDB = promisesub(db, 'm')
+  const namesDB = promisesub(db, 'n')
+  const getQueue = function getQueue ({ name, worker, autostart=true, concurrency=1 }) {
     if (running[name]) return running[name]
     if (!worker) throw new Error('expected "worker"')
 
-    const path = `queues.${name}`
-    let items = db.get(path).value()
-    if (!items) {
-      items = []
-      update(items)
-    }
-
-    const queue = running[name] = createQueue({
-      items,
-      worker,
+    namesDB.putAsync(name, true)
+    const queue = createQueue({
       autostart,
-      save: update
+      worker,
+      db: subdown(mainDB, name)
     })
 
     queue.on('pop', function (item) {
@@ -40,29 +38,55 @@ module.exports = function createQueueManager (path) {
     })
 
     return queue
-
-    function update (items) {
-      db.set(path, items).value()
-    }
   }
+
+  const queued = co(function* queued (name) {
+    if (name) {
+      const queue = yield getQueue({ name })
+      return queue.queued()
+    }
+
+    const names = yield collect(namesDB.createKeyStream())
+    const allQueued = yield Promise.all(names.map(name => {
+      return tempOp({
+        name,
+        op: tmp => tmp.queued()
+      })
+    }))
+
+    const byName = {}
+    allQueued.forEach((queued, i) => {
+      byName[names[i]] = queued
+    })
+
+    return byName
+  })
+
+  const deleteQueueDB = co(function* deleteQueueDB (name) {
+    const qdb = promisesub(db, name)
+    const keys = yield collect(qdb.createKeyStream())
+    const batch = keys.map(key => {
+      return { type: 'del', key }
+    })
+
+    yield qdb.batchAsync(batch)
+  })
 
   const clear = co(function* clear (name) {
     if (name) {
       if (running[name]) {
-        yield running[name].clear()
-      } else {
-        db.set(`queues.${name}`, []).value()
+        yield running[name].stop()
       }
 
+      yield deleteQueueDB(name)
       return
     }
 
-    yield clearAll()
-    db.set('queues', {}).value()
+    return clearAll()
   })
 
   function clearAll () {
-    return Promise.all(Object.keys(running).map(clear))
+    return db.destroyAsync()
   }
 
   const stop = co(function* stop (name) {
@@ -76,92 +100,83 @@ module.exports = function createQueueManager (path) {
   emitter.queue = getQueue
   emitter.clear = clear
   emitter.stop = stop
-  emitter.queued = function (name) {
-    if (name) {
-      return getQueue({ name }).queued()
-    }
+  emitter.queued = queued
+  const tempOp = co(function* tempOp ({ name, op }) {
+    const tmp = createQueue({
+      autostart: true,
+      db: subdown(mainDB, name),
+      worker: noop
+    })
 
-    return db.get('queues').value()
-  }
+    const result = yield op(tmp)
+    yield tmp.stop()
+    return result
+  })
 
   return emitter
 }
 
 
-function createQueue ({ items, worker, save, autostart }) {
+function createQueue ({ db, worker, opts=LEVEL_JOBS_OPTS, autostart }) {
+  let queue
   let stopped
-  let pending = Promise.resolve()
-  let processing
-
-  const processNext = co(function* () {
-    if (stopped || processing || !items.length) return
-
-    processing = true
-    const next = items[0]
-    const maybePromise = worker(next)
-    if (isPromise(maybePromise)) yield maybePromise
-
-    items.shift()
-    save(items)
-    processing = false
-
-    emitter.emit('pop', next)
-    processNext()
+  let started
+  let start
+  let awaitStarted = new Promise(resolve => {
+    start = function () {
+      if (worker !== noop) debugger
+      resolve()
+    }
   })
 
-  function isPromise (obj) {
-    return obj && typeof obj.then === 'function'
-  }
+  db = Promise.promisifyAll(db)
+  worker = wrapWorker(worker)
+  queue = Promise.promisifyAll(levelJobs(db, worker, opts))
 
-  function stop () {
-    if (stopped) return Promise.resolve()
+  function wrapWorker (worker) {
+    worker = Promise.promisify(worker)
+    return co(function* (item) {
+      // hang
+      if (stopped) return
 
-    stopped = true
-    return new Promise(resolve => {
-      if (!processing) return resolve()
-
-      emitter.once('pop', function () {
-        resolve()
-        emitter.emit('stop')
-      })
+      yield awaitStarted
+      yield worker(item)
+      emitter.emit('pop', item)
     })
   }
 
-  function start () {
-    stopped = false
-    processNext()
-  }
-
   function enqueue (item) {
-    items.push(item)
-    save(items)
-    processNext()
+    return queue.pushAsync(item)
   }
 
-  const clear = co(function* clear () {
-    let wasStopped = stopped
-    yield stop()
-    items.length = 0
-    save(items)
-    if (!wasStopped) start()
-  })
+  function stop (item) {
+    stopped = true
+    return db.closeAsync()
+  }
 
   const emitter = new EventEmitter()
   emitter.enqueue = enqueue
   emitter.stop = stop
   emitter.start = start
-  emitter.clear = clear
-  emitter.queued = function () {
-    return items.slice()
+  emitter.queued = function queued () {
+    return collect(queue.readStream({ keys: false }))
   }
 
-  Object.defineProperty(emitter, 'length', {
-    get: function () {
-      return items.length
-    }
-  })
+  emitter.length = function () {
+    return new Promise((resolve, reject) => {
+      let count = 0
+      queue.readStream({ values: false })
+        .on('data', data => count++)
+        .once('error', reject)
+        .once('end', () => resolve(count))
+    })
+  }
 
   if (autostart) start()
 
   return emitter
+}
+
+function promisesub (...args) {
+  return Promise.promisifyAll(subdown(...args))
 }
