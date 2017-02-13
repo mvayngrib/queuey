@@ -1,12 +1,14 @@
+const path = require('path')
 const { EventEmitter } = require('events')
 const debug = require('debug')('queuey:queue')
+const extend = require('xtend')
 const Promise = require('bluebird')
 const co = Promise.coroutine
 const collect = Promise.promisify(require('stream-collector'))
 const changesFeed = require('changes-feed')
-const subdown = require('subleveldown')
 const lexint = require('lexicographic-integer')
 const processChanges = require('level-change-processor')
+const levelup = require('levelup')
 const LEVEL_OPTS = {
   keyEncoding: 'utf8',
   valueEncoding: 'json'
@@ -14,11 +16,7 @@ const LEVEL_OPTS = {
 
 module.exports = createQueue
 
-function createQueue ({ db, worker, autostart }) {
-  if (db.options.valueEncoding !== 'json') {
-    throw new Error('expected "json" valueEncoding')
-  }
-
+function createQueue ({ dir, leveldown, worker, autostart }) {
   let stopped
   let started
   let start
@@ -29,16 +27,13 @@ function createQueue ({ db, worker, autostart }) {
     }
   })
 
-  db = Promise.promisifyAll(db)
-  const rawFeedDB = subdown(db, 'c', LEVEL_OPTS)
-  const feedDB = Promise.promisifyAll(rawFeedDB)
-  const rawFeed = changesFeed(rawFeedDB)
-  const counterDB = subdown(db, 'm', LEVEL_OPTS)
-  const feed = Promise.promisifyAll(rawFeed)
+  const feedDB = newDB('feed')
+  const feed = Promise.promisifyAll(changesFeed(feedDB))
+  const counterDB = newDB('feedState')
 
   const processor = processChanges({
     db: counterDB,
-    feed: rawFeed,
+    feed,
     worker: co(function* ({ change, value }, cb) {
       // hang
       if (stopped) return
@@ -52,6 +47,9 @@ function createQueue ({ db, worker, autostart }) {
       }
 
       debug('processed item ' + change)
+
+      // this unfortunately relies on the
+      // internal structure of changes-feed
       yield feedDB.delAsync(hexint(change))
       cb()
 
@@ -61,7 +59,10 @@ function createQueue ({ db, worker, autostart }) {
 
   function stop (item) {
     stopped = true
-    return db.closeAsync()
+    return Promise.all([
+      feedDB.closeAsync(),
+      counterDB.closeAsync()
+    ])
   }
 
   const emitter = new EventEmitter()
@@ -71,12 +72,19 @@ function createQueue ({ db, worker, autostart }) {
 
   emitter.stop = stop
   emitter.start = start
-  emitter.queued = () => getValues(rawFeed)
-  emitter.length = () => getDBSize(rawFeed)
+  emitter.queued = () => getValues(feed)
+  emitter.length = () => getDBSize(feed)
 
   if (autostart) start()
 
   return emitter
+
+  function newDB (dbPath) {
+    const opts = extend(LEVEL_OPTS)
+    if (leveldown) opts.leveldown = leveldown
+    const db = levelup(path.join(dir, dbPath), opts)
+    return Promise.promisifyAll(db)
+  }
 }
 
 function getFirst (feed) {
@@ -98,10 +106,6 @@ const getDBSize = co(function* (feed) {
 
 function getValues (feed) {
   return collect(feed.createReadStream({ keys: false }))
-}
-
-function promisesub (...args) {
-  return Promise.promisifyAll(subdown(...args))
 }
 
 function hexint (num) {

@@ -3,31 +3,40 @@ const fs = require('fs')
 const test = require('tape')
 const Promise = require('bluebird')
 const co = Promise.coroutine
-const memdb = require('memdb')
-const makeQueues = require('./')
+const { cleanup, testPath, createDB } = require('./utils')
+const makeQueues = require('../')
 
-test.only('basic', co(function* (t) {
-  const queues = getQueues()
+cleanup()
+
+test('basic', co(function* (t) {
+  let db = createDB('a')
+  ;['open', 'opening', 'ready', 'closing', 'closed', 'put', 'get', 'batch', 'del'].forEach(event => {
+    db.on(event, function () {
+      console.log(event)
+    })
+  })
+
+  const queues = getQueues(db)
   t.same(yield queues.queued(), {})
 
   const queue = getTimeoutQueue(queues)
-  t.same(yield queues.queued(), { wait: [] })
+  t.same(yield queue.queued(), [])
 
   const todo = [
+    { timeout: 100, value: 0 },
     { timeout: 50, value: 1 },
     { timeout: 10, value: 2 }
   ];
 
   yield Promise.all(todo.map(item => queue.enqueue(item)))
 
+  // yield new Promise(resolve => setTimeout(resolve, 1000))
   t.same(yield queues.queued(), { wait: todo })
   t.same(yield queue.queued(), todo)
 
-  queue.start()
-
   let i = 0
   queue.once('pop', co(function* () {
-    yield queue.stop()
+    yield queues.stop()
     reopen()
   }))
 
@@ -36,28 +45,32 @@ test.only('basic', co(function* (t) {
   })
 
   const reopen = co(function* reopen () {
-    const queues = getQueues()
+    // yield new Promise(resolve => setTimeout(resolve, 1))
+    yield db.closeAsync()
+    // yield new Promise(resolve => setTimeout(resolve, 1000))
+    db = createDB('a')
+    const queues = getQueues(db)
     const resurrected = getTimeoutQueue(queues)
     t.same(yield queues.queued(), { wait: todo.slice(1) })
     t.same(yield queues.queued('wait'), todo.slice(1))
     t.same(yield resurrected.queued(), todo.slice(1))
-    resurrected.on('pop', function (item) {
+    resurrected.on('pop', co(function* (item) {
       t.equal(item.value, i++)
       if (i === todo.length) {
-        t.end()
+        yield queues.stop()
+        db.close(t.end)
       }
-    })
+    }))
   })
 
-  function getQueues () {
-    return makeQueues(memdb())
+  function getQueues (db) {
+    return makeQueues({ db })
   }
 
   function getTimeoutQueue (queues, autostart=false) {
     return queues.queue({
-      autostart,
-      name: 'wait',
-      worker: timeoutSuccess
+      worker: timeoutSuccess,
+      name: 'wait'
     })
   }
 }))
@@ -72,12 +85,15 @@ test('clear one', co(function* (t) {
   let expectedFinished = 1
   let finished = 0
 
-  const queues = makeQueues(memdb())
+  const queues = makeQueues({
+    db: createDB('b')
+  })
+
   const a = queues.queue({ name: 'a', worker: timeoutCounter })
-  todo.forEach(item => a.enqueue(item))
-  t.same(a.queued(), todo)
+  yield Promise.all(todo.map(item => a.enqueue(item)))
+  t.same(yield a.queued(), todo)
   yield a.clear()
-  t.same(a.queued(), [])
+  t.same(yield a.queued(), [])
   setTimeout(function () {
     t.equal(finished, expectedFinished)
     t.end()
@@ -94,7 +110,7 @@ test('clear one', co(function* (t) {
 }))
 
 test('clear all', co(function* (t) {
-  const queues = makeQueues(memdb())
+  const queues = makeQueues(createDB('c'))
   const todo = [
     { timeout: 100 },
     { timeout: 50 },
@@ -105,8 +121,8 @@ test('clear all', co(function* (t) {
   const b = queues.queue({ name: 'b', worker: timeoutCounter })
 
   // run 2 queues
-  todo.forEach(item => a.enqueue(item))
-  todo.forEach(item => b.enqueue(item))
+  yield Promise.all(todo.map(item => a.enqueue(item)))
+  yield Promise.all(todo.map(item => b.enqueue(item)))
 
   let expectedFinished = 2
   let finished = 0

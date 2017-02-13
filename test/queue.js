@@ -7,21 +7,11 @@ const test = require('tape')
 const Promise = require('bluebird')
 const co = Promise.coroutine
 const createQueue = require('../queue')
-const TEST_DB_PATH = path.resolve(__dirname, 'testdbs')
-
-let dbCounter = 0
-cleanup()
-
-function createDB (name) {
-  if (!name) name = dbCounter++ + '.db'
-  const dbPath = path.resolve(TEST_DB_PATH, name)
-  mkdirp.sync(dbPath)
-  return levelup(dbPath, { valueEncoding: 'json' })
-}
+const { cleanup, testPath } = require('./utils')
 
 test('basic', co(function* (t) {
   const queue = createQueue({
-    db: createDB('0'),
+    dir: testPath('0'),
     worker: timeoutSuccess
   })
 
@@ -48,7 +38,7 @@ test('basic', co(function* (t) {
 
   const reopen = co(function* reopen () {
     const queue = createQueue({
-      db: createDB('0'),
+      dir: testPath('0'),
       worker: timeoutSuccess
     })
 
@@ -83,8 +73,4 @@ function timeoutError (item) {
       reject(new Error('timed out'))
     }, item.timeout)
   })
-}
-
-function cleanup () {
-  rimraf.sync(TEST_DB_PATH)
 }
