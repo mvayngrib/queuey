@@ -3,18 +3,13 @@ const debug = require('debug')('queuey:queue')
 const Promise = require('bluebird')
 const co = Promise.coroutine
 const collect = Promise.promisify(require('stream-collector'))
-const indexer = require('feed-indexer')
 const changesFeed = require('changes-feed')
 const subdown = require('subleveldown')
 const lexint = require('lexicographic-integer')
+const processChanges = require('level-change-processor')
 const LEVEL_OPTS = {
   keyEncoding: 'utf8',
   valueEncoding: 'json'
-}
-
-const topics = {
-  enqueue: 0,
-  dequeue: 1
 }
 
 module.exports = createQueue
@@ -23,29 +18,6 @@ function createQueue ({ db, worker, autostart }) {
   if (db.options.valueEncoding !== 'json') {
     throw new Error('expected "json" valueEncoding')
   }
-
-  db = Promise.promisifyAll(db)
-  const rawFeed = changesFeed(subdown(db, 'c', LEVEL_OPTS))
-  const rawDB = subdown(db, 'm', LEVEL_OPTS)
-  const feed = Promise.promisifyAll(rawFeed)
-  const primaryKey = 'key'
-  const entryProp = '_'
-  const indexed = indexer({
-    db: rawDB,
-    feed: rawFeed,
-    primaryKey,
-    entryProp: entryProp,
-    reduce: function (state, change, cb) {
-      const { topic } = change.value
-      if (topic === topics.enqueue) {
-        delete change.value.topic
-        return cb(null, change.value)
-      }
-
-      // get deleted
-      cb()
-    }
-  })
 
   let stopped
   let started
@@ -57,36 +29,34 @@ function createQueue ({ db, worker, autostart }) {
     }
   })
 
-  worker = wrapWorker(worker)
+  db = Promise.promisifyAll(db)
+  const rawFeedDB = subdown(db, 'c', LEVEL_OPTS)
+  const feedDB = Promise.promisifyAll(rawFeedDB)
+  const rawFeed = changesFeed(rawFeedDB)
+  const counterDB = subdown(db, 'm', LEVEL_OPTS)
+  const feed = Promise.promisifyAll(rawFeed)
 
-  function wrapWorker (worker) {
-    return co(function* ({ key, value }) {
+  const processor = processChanges({
+    db: counterDB,
+    feed: rawFeed,
+    worker: co(function* ({ change, value }, cb) {
       // hang
       if (stopped) return
 
       yield awaitStarted
-      debug('processing item ' + key)
-      yield worker(value)
+      debug('processing item ' + change)
+      try {
+        yield worker(value)
+      } catch (err) {
+        return cb(err)
+      }
 
-      yield feed.appendAsync({
-        topic: topics.dequeue,
-        key
-      })
+      debug('processed item ' + change)
+      yield feedDB.delAsync(hexint(change))
+      cb()
 
       emitter.emit('pop', value)
     })
-  }
-
-  const enqueue = co(function* enqueue (item) {
-    debug('enqueueing')
-    const key = yield feed.countAsync()
-    yield feed.appendAsync({
-      topic: topics.enqueue,
-      value: item,
-      key: hexint(key)
-    })
-
-    debug('enqueued')
   })
 
   function stop (item) {
@@ -95,42 +65,39 @@ function createQueue ({ db, worker, autostart }) {
   }
 
   const emitter = new EventEmitter()
-  emitter.enqueue = enqueue
+  emitter.enqueue = function (item) {
+    return feed.appendAsync(item)
+  }
+
   emitter.stop = stop
   emitter.start = start
-  emitter.queued = co(function* () {
-    indexed.createReadStream().on('data', console.log)
-    const vals = yield getValues(indexed)
-    return vals.map(val => val.value)
-  })
-
-  emitter.length = () => getDBSize(indexed)
+  emitter.queued = () => getValues(rawFeed)
+  emitter.length = () => getDBSize(rawFeed)
 
   if (autostart) start()
 
   return emitter
 }
 
-function getFirst (db) {
-  return collect(db.createReadStream({ limit: 1 }))
+function getFirst (feed) {
+  return collect(feed.createReadStream({ limit: 1 }))
 }
 
-function getLast (db) {
-  return collect(db.createReadStream({ limit: 1, reverse: true }))
+function getLast (feed) {
+  return collect(feed.createReadStream({ limit: 1, reverse: true }))
 }
 
-const getDBSize = co(function* (db) {
+const getDBSize = co(function* (feed) {
   const [first, last] = yield Promise.all([
-    getFirst(db),
-    getLast(db)
+    getFirst(feed),
+    getLast(feed)
   ])
 
-  // console.log(last, first)
   return last - first
 })
 
-function getValues (db) {
-  return collect(db.createReadStream({ keys: false }))
+function getValues (feed) {
+  return collect(feed.createReadStream({ keys: false }))
 }
 
 function promisesub (...args) {

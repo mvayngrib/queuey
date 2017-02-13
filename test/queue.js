@@ -12,8 +12,8 @@ const TEST_DB_PATH = path.resolve(__dirname, 'testdbs')
 let dbCounter = 0
 cleanup()
 
-function createDB (num) {
-  const name = String(num || dbCounter++) + '.db'
+function createDB (name) {
+  if (!name) name = dbCounter++ + '.db'
   const dbPath = path.resolve(TEST_DB_PATH, name)
   mkdirp.sync(dbPath)
   return levelup(dbPath, { valueEncoding: 'json' })
@@ -21,7 +21,7 @@ function createDB (num) {
 
 test('basic', co(function* (t) {
   const queue = createQueue({
-    db: createDB(0),
+    db: createDB('0'),
     worker: timeoutSuccess
   })
 
@@ -48,11 +48,12 @@ test('basic', co(function* (t) {
 
   const reopen = co(function* reopen () {
     const queue = createQueue({
-      db: createDB(0),
+      db: createDB('0'),
       worker: timeoutSuccess
     })
 
     t.same(yield queue.queued(), todo.slice(1))
+    queue.start()
     queue.on('pop', co(function* (item) {
       t.equal(item.value, i++)
       if (i === todo.length) {
