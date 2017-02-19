@@ -1,15 +1,19 @@
 
 const { EventEmitter } = require('events')
 const low = require('lowdb')
+const fileAsync = require('lowdb/lib/storages/file-async')
 const Promise = require('bluebird')
 const co = Promise.coroutine
 
 module.exports = function createQueueManager (path) {
-  const db = low(path)
+  const db = low(path, {
+    storage: fileAsync
+  })
+
   db.defaults({
       queues: {}
     })
-    .value()
+    .write()
 
   const running = {}
 
@@ -17,17 +21,14 @@ module.exports = function createQueueManager (path) {
     if (running[name]) return running[name]
     if (!worker) throw new Error('expected "worker"')
 
-    const path = `queues.${name}`
-    let items = db.get(path).value()
-    if (!items) {
-      items = []
-      update(items)
-    }
+    const qpath = `queues.${name}`
+    let qdb = db.get(qpath)
+    if (!qdb.value()) db.set(qpath, []).write()
 
     const queue = running[name] = createQueue({
-      items,
+      db: qdb,
       worker,
-      autostart,
+      autostart: false,
       save: update
     })
 
@@ -42,7 +43,7 @@ module.exports = function createQueueManager (path) {
     return queue
 
     function update (items) {
-      db.set(path, items).value()
+      return db.set(path, items).write()
     }
   }
 
@@ -51,19 +52,20 @@ module.exports = function createQueueManager (path) {
       if (running[name]) {
         yield running[name].clear()
       } else {
-        db.set(`queues.${name}`, []).value()
+        yield db.set(`queues.${name}`, []).value()
       }
 
       return
     }
 
-    yield clearAll()
-    db.set('queues', {}).value()
+    return clearAll()
   })
 
-  function clearAll () {
-    return Promise.all(Object.keys(running).map(clear))
-  }
+  const clearAll = co(function* () {
+    // TODO: optimize
+    yield Promise.all(Object.keys(running).map(clear))
+    // return db.set('queues', {}).value()
+  })
 
   const stop = co(function* stop (name) {
     if (running[name]) {
@@ -81,15 +83,20 @@ module.exports = function createQueueManager (path) {
       return getQueue({ name }).queued()
     }
 
-    return db.get('queues').value()
+    return Promise.resolve(db.get('queues').value())
   }
 
   return emitter
 }
 
-
-function createQueue ({ items, worker, save, autostart }) {
+function createQueue ({ db, worker, save, autostart }) {
   let stopped
+  let items = db.value() || []
+  // if (!items) {
+  //   items = []
+  //   db.set(items).write()
+  // }
+
   let pending = Promise.resolve()
   let processing
 
@@ -102,7 +109,7 @@ function createQueue ({ items, worker, save, autostart }) {
     if (isPromise(maybePromise)) yield maybePromise
 
     items.shift()
-    save(items)
+    yield save(items)
     processing = false
 
     emitter.emit('pop', next)
@@ -132,17 +139,17 @@ function createQueue ({ items, worker, save, autostart }) {
     processNext()
   }
 
-  function enqueue (item) {
+  const enqueue = co(function* enqueue (item) {
     items.push(item)
-    save(items)
+    yield save(items)
     processNext()
-  }
+  })
 
   const clear = co(function* clear () {
     let wasStopped = stopped
     yield stop()
     items.length = 0
-    save(items)
+    yield save(items)
     if (!wasStopped) start()
   })
 
@@ -152,14 +159,10 @@ function createQueue ({ items, worker, save, autostart }) {
   emitter.start = start
   emitter.clear = clear
   emitter.queued = function () {
-    return items.slice()
+    return Promise.resolve(items.slice())
   }
 
-  Object.defineProperty(emitter, 'length', {
-    get: function () {
-      return items.length
-    }
-  })
+  emitter.length = () => Promise.resolve(items.length)
 
   if (autostart) start()
 
