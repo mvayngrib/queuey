@@ -6,9 +6,7 @@ const Promise = require('bluebird')
 const co = Promise.coroutine
 
 module.exports = function createQueueManager (path) {
-  const db = low(path, {
-    storage: fileAsync
-  })
+  const db = path ? low(path, { storage: fileAsync }) : low()
 
   db.defaults({
       queues: {}
@@ -24,6 +22,10 @@ module.exports = function createQueueManager (path) {
     const qpath = `queues.${name}`
     let qdb = db.get(qpath)
     if (!qdb.value()) db.set(qpath, []).write()
+
+    const update = co(function* (items) {
+      return db.set(path, items).write()
+    })
 
     const queue = running[name] = createQueue({
       db: qdb,
@@ -41,10 +43,6 @@ module.exports = function createQueueManager (path) {
     })
 
     return queue
-
-    function update (items) {
-      return db.set(path, items).write()
-    }
   }
 
   const clear = co(function* clear (name) {
