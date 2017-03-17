@@ -15,7 +15,7 @@ module.exports = function createQueueManager (path) {
 
   const running = {}
 
-  function getQueue ({ name, worker, autostart=true }) {
+  function getQueue ({ name, worker, autostart }) {
     if (running[name]) return running[name]
     if (!worker) throw new Error('expected "worker"')
 
@@ -30,7 +30,7 @@ module.exports = function createQueueManager (path) {
     const queue = running[name] = createQueue({
       db: qdb,
       worker,
-      autostart: false,
+      autostart,
       save: update
     })
 
